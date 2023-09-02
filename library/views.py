@@ -6,6 +6,57 @@ from django.contrib.auth import authenticate, login, logout
 from . import forms, models
 from datetime import date
 from django.contrib.auth.decorators import login_required
+from rest_framework import viewsets
+from .models import SMS
+from .serializers import SMSSerializer
+from circuitbreaker import circuit
+
+# Mock functions for sending SMS using two different providers
+def send_sms_via_kavenegar(message, recipient):
+    # Replace this with actual code to send SMS via Kavenegar
+    print(f"Sending SMS via Kavenegar to {recipient}: {message}")
+    return True  # Simulate success
+
+def send_sms_via_signalwire(message, recipient):
+    # Replace this with actual code to send SMS via SignalWire
+    print(f"Sending SMS via SignalWire to {recipient}: {message}")
+    return True  # Simulate success
+
+# Circuit Breaker Configuration
+kavenegar_breaker = circuit(kavenegar_fail_max=3, kavenegar_reset_timeout=3600)
+signalwire_breaker = circuit(signalwire_fail_max=3, signalwire_reset_timeout=3600)
+
+class SMSViewSet(viewsets.ModelViewSet):
+    queryset = SMS.objects.all()
+    serializer_class = SMSSerializer
+
+    def perform_create(self, serializer):
+        message = serializer.validated_data['message']
+        recipient = serializer.validated_data['recipient']
+
+        try:
+            @kavenegar_breaker
+            def send_sms_via_kavenegar_safe(message, recipient):
+                return send_sms_via_kavenegar(message, recipient)
+
+            @signalwire_breaker
+            def send_sms_via_signalwire_safe(message, recipient):
+                return send_sms_via_signalwire(message, recipient)
+
+            # Attempt to send via Kavenegar first
+            if send_sms_via_kavenegar_safe(message, recipient):
+                serializer.save()
+                return
+            else:
+                # If Kavenegar fails, try SignalWire
+                if send_sms_via_signalwire_safe(message, recipient):
+                    serializer.save()
+                    return
+                else:
+                    raise Exception("All SMS providers are unavailable at the moment.")
+
+        except Exception as e:
+            raise Exception(str(e))
 
 def index(request):
     return render(request, "index.html")
